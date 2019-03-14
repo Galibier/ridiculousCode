@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "MinGW64",
+            "intelliSenseMode": "gcc-x64",
+            "compilerPath": "C:/MinGW/bin/gcc.exe",
+            "systemIncludePath": [
+                "C:/MinGW/include"
+            ],
+            "includePath": [
+                "${workspaceFolder}"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}"
+                ]
+            },
+            "limitSymbolsToIncludedHeaders": true,
+            "cStandard": "c11"
+        }
+    ],
+    "version": 4
+}
