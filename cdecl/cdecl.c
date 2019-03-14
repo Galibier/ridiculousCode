@@ -75,8 +75,7 @@ static struct token_t stack_pop(void) {
     return stack[--head];
 }
 
-static bool
-stack_is_empty(void) {
+static bool stack_is_empty(void) {
     return head == 0;
 }
 
