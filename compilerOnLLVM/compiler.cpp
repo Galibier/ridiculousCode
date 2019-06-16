@@ -7,6 +7,9 @@
 #include <string>
 #include <vector>
 
+#include <cassert>
+#include <cstdint>
+
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -19,7 +22,17 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
 
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+
+#include "JIT.h"
+
 using namespace llvm;
+using namespace llvm::orc;
 
 enum {
     tok_eof = -1,
@@ -31,6 +44,10 @@ enum {
 
 static std::string IdentifierStr;
 static double NumVal;
+
+//===----------------------------------------------------------------------===//
+// Lexer
+//===----------------------------------------------------------------------===//
 
 static int gettok() {
     static int LastChar = ' ';
@@ -71,6 +88,10 @@ static int gettok() {
     LastChar = getchar();
     return ThisChar;
 }
+
+//===----------------------------------------------------------------------===//
+// Abstract Syntax Tree (aka Parse Tree)
+//===----------------------------------------------------------------------===//
 
 namespace {
 class ExprAST {
@@ -146,6 +167,10 @@ class FunctionAST {
     Function *codegen();
 };
 }  // namespace
+
+//===----------------------------------------------------------------------===//
+// Parser
+//===----------------------------------------------------------------------===//
 
 static int CurTok;
 static int getNextToken() { return CurTok = gettok(); }
@@ -308,8 +333,21 @@ static IRBuilder<> Builder(TheContext);
 static std::unique_ptr<Module> TheModule;
 static std::map<std::string, Value *> NamedValues;
 
+static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
+
 Value *LogErrorV(const char *Str) {
     LogError(Str);
+    return nullptr;
+}
+
+Function *getFunction(std::string Name) {
+    if (auto *F = TheModule->getFunction(Name)) return F;
+
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end()) return FI->second->codegen();
+
     return nullptr;
 }
 
@@ -345,7 +383,7 @@ Value *BinaryExprAST::codegen() {
 }
 
 Value *CallExprAST::codegen() {
-    Function *CalleeF = TheModule->getFunction(Callee);
+    Function *CalleeF = getFunction(Callee);
     if (!CalleeF) return LogErrorV("Unknown function referenced");
 
     if (CalleeF->arg_size() != Args.size())
@@ -374,9 +412,9 @@ Function *PrototypeAST::codegen() {
 }
 
 Function *FunctionAST::codegen() {
-    Function *TheFunction = TheModule->getFunction(Proto->getName());
-
-    if (!TheFunction) TheFunction = Proto->codegen();
+    auto &P = *Proto;
+    FunctionProtos[Proto->getName()] = std::move(Proto);
+  Function *TheFunction = getFunction(P.getName());
 
     if (!TheFunction) return nullptr;
 
@@ -390,6 +428,7 @@ Function *FunctionAST::codegen() {
         Builder.CreateRet(RetVal);
 
         verifyFunction(*TheFunction);
+        TheFPM->run(*TheFunction);
 
         return TheFunction;
     }
@@ -402,12 +441,26 @@ Function *FunctionAST::codegen() {
 // Top-Level parsing and JIT Driver
 //===----------------------------------------------------------------------===//
 
+static void InitializeModuleAndPassManager() {
+    TheModule = llvm::make_unique<Module>("JIT", TheContext);
+    TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
+
+    TheFPM = llvm::make_unique<legacy::FunctionPassManager>(TheModule.get());
+    TheFPM->add(createInstructionCombiningPass());
+    TheFPM->add(createReassociatePass());
+    TheFPM->add(createGVNPass());
+    TheFPM->add(createCFGSimplificationPass());
+    TheFPM->doInitialization();
+}
+
 static void HandleDefinition() {
     if (auto FnAST = ParseDefinition()) {
         if (auto *FnIR = FnAST->codegen()) {
             fprintf(stderr, "Read a function definition:");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            TheJIT->addModule(std::move(TheModule));
+            InitializeModuleAndPassManager();
         }
     } else {
         getNextToken();
@@ -420,6 +473,7 @@ static void HandleExtern() {
             fprintf(stderr, "Read extern:");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
         }
     } else {
         getNextToken();
@@ -428,10 +482,18 @@ static void HandleExtern() {
 
 static void HandleTopLevelExpression() {
     if (auto FnAST = ParseTopLevelExpr()) {
-        if (auto *FnIR = FnAST->codegen()) {
-            fprintf(stderr, "Read top-level expression:");
-            FnIR->print(errs());
-            fprintf(stderr, "\n");
+        if (FnAST->codegen()) {
+            auto H = TheJIT->addModule(std::move(TheModule));
+            InitializeModuleAndPassManager();
+
+            auto ExprSymbol = TheJIT->findSymbol("__anon_expr");
+            assert(ExprSymbol && "Function not found");
+
+            double (*FP)() =
+                (double (*)())(intptr_t)cantFail(ExprSymbol.getAddress());
+            fprintf(stderr, "Evaluated to %f\n", FP());
+
+            TheJIT->removeModule(H);
         }
     } else {
         getNextToken();
@@ -460,7 +522,30 @@ static void MainLoop() {
     }
 }
 
+//===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+#define DLLEXPORT
+
+extern "C" DLLEXPORT double putchard(double X) {
+    fputc((char)X, stderr);
+    return 0;
+}
+
+extern "C" DLLEXPORT double printd(double X) {
+    fprintf(stderr, "%f\n", X);
+    return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// Main driver code.
+//===----------------------------------------------------------------------===//
+
 int main() {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
+
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
@@ -469,11 +554,11 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    TheModule = llvm::make_unique<Module>("JIT", TheContext);
+    TheJIT = llvm::make_unique<KaleidoscopeJIT>();
+
+    InitializeModuleAndPassManager();
 
     MainLoop();
-
-    TheModule->print(errs(), nullptr);
 
     return 0;
 }
