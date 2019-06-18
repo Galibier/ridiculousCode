@@ -1,5 +1,6 @@
 # Simple Compiler Based On LLVM
 
+    http://llvm.org/docs/tutorial/index.html
 - Tutorial Introduction and the Lexer
 - Implementing a Parser and AST
 - Code generation to LLVM IR
