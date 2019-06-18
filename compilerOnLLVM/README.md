@@ -1,6 +1,9 @@
 # Simple Compiler Based On LLVM
 
     http://llvm.org/docs/tutorial/index.html
+
+> clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs`
+
 - Tutorial Introduction and the Lexer
 - Implementing a Parser and AST
 - Code generation to LLVM IR
