@@ -1,7 +1,7 @@
 #pragma once
 
 //(ARM处理器体系结构寄存器类型)
-#define MAXBIT 32	//位图最大长度
+#define MAXBIT 32  //位图最大长度
 //定义支持32个32位寄存器的位图
 #define R0 0x1
 #define R1 0x2
@@ -83,26 +83,26 @@
 #define v7 V7
 #define v8 V8
 //特殊寄存器
-#define SB R9	//静态基址寄存器
+#define SB R9  //静态基址寄存器
 #define sb SB
-#define SL R10	//堆栈限制寄存器
+#define SL R10  //堆栈限制寄存器
 #define sl SL
-#define FP R11	//帧指针
+#define FP R11  //帧指针
 #define fp FP
 
-#define IP R12	//过程调用中间临时寄存器
+#define IP R12  //过程调用中间临时寄存器
 #define ip IP
-#define SP R13	//堆栈指针
+#define SP R13  //堆栈指针
 #define sp SP
-#define LR R14	//链接寄存器，保存返回地址
+#define LR R14  //链接寄存器，保存返回地址
 #define lr LR
-#define PC R15	//程序计数器
+#define PC R15  //程序计数器
 #define pc PC
-#define CPSR R16	//当前程序状态寄存器
+#define CPSR R16  //当前程序状态寄存器
 #define cpsr CPSR
-#define SPSR R17	//保存的程序状态寄存器
+#define SPSR R17  //保存的程序状态寄存器
 #define spsr SPSR
 
-#define R_LEGAL 0xfffc0000	//合法的可以使用的寄存器，R0-R17
-#define R_USABLE R_LEGAL|SPSR|CPSR|PC|LR|SP	//默认可以分配的寄存器，R0-R12
-
+#define R_LEGAL 0xfffc0000  //合法的可以使用的寄存器，R0-R17
+#define R_USABLE \
+    R_LEGAL | SPSR | CPSR | PC | LR | SP  //默认可以分配的寄存器，R0-R12
