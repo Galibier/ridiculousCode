@@ -1,45 +1,45 @@
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
-#include <cassert>
-#include <cstdint>
-
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
-
-#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Scalar/GVN.h"
-
-#include <utility>
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/Transforms/Utils.h"
-
-#include "JIT.h"
+#include "llvm/Target/TargetOptions.h"
 
 using namespace llvm;
-using namespace llvm::orc;
+using namespace llvm::sys;
 
-enum {
+//===----------------------------------------------------------------------===//
+// Lexer
+//===----------------------------------------------------------------------===//
+
+enum Token {
     tok_eof = -1,
     tok_def = -2,
     tok_extern = -3,
@@ -55,7 +55,7 @@ enum {
     tok_binary = -11,
     tok_unary = -12,
 
-    tok_var = -12
+    tok_var = -13
 };
 
 static std::string IdentifierStr;
@@ -443,15 +443,14 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
 }
 
 static std::unique_ptr<ExprAST> ParseUnary() {
-    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',') {
+    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
         return ParsePrimary();
-    }
 
     int Opc = CurTok;
     getNextToken();
-    if (auto Operand = ParseUnary()) {
+    if (auto Operand = ParseUnary())
         return llvm::make_unique<UnaryExprAST>(Opc, std::move(Operand));
-    }
+
     return nullptr;
 }
 
@@ -569,9 +568,6 @@ static LLVMContext TheContext;
 static IRBuilder<> Builder(TheContext);
 static std::unique_ptr<Module> TheModule;
 static std::map<std::string, AllocaInst *> NamedValues;
-
-static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
-static std::unique_ptr<KaleidoscopeJIT> TheJIT;
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 
 Value *LogErrorV(const char *Str) {
@@ -810,8 +806,8 @@ Function *FunctionAST::codegen() {
     auto &P = *Proto;
     FunctionProtos[Proto->getName()] = std::move(Proto);
     Function *TheFunction = getFunction(P.getName());
-
     if (!TheFunction) return nullptr;
+
     if (P.isBinaryOp())
         BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
 
@@ -827,14 +823,12 @@ Function *FunctionAST::codegen() {
 
     if (Value *RetVal = Body->codegen()) {
         Builder.CreateRet(RetVal);
-
         verifyFunction(*TheFunction);
-        TheFPM->run(*TheFunction);
-
         return TheFunction;
     }
 
     TheFunction->eraseFromParent();
+    if (P.isBinaryOp()) BinopPrecedence.erase(P.getOperatorName());
     return nullptr;
 }
 
@@ -844,16 +838,6 @@ Function *FunctionAST::codegen() {
 
 static void InitializeModuleAndPassManager() {
     TheModule = llvm::make_unique<Module>("JIT", TheContext);
-    TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
-
-    TheFPM = llvm::make_unique<legacy::FunctionPassManager>(TheModule.get());
-
-    TheFPM->add(createPromoteMemoryToRegisterPass());
-    TheFPM->add(createInstructionCombiningPass());
-    TheFPM->add(createReassociatePass());
-    TheFPM->add(createGVNPass());
-    TheFPM->add(createCFGSimplificationPass());
-    TheFPM->doInitialization();
 }
 
 static void HandleDefinition() {
@@ -862,8 +846,6 @@ static void HandleDefinition() {
             fprintf(stderr, "Read a function definition:");
             FnIR->print(errs());
             fprintf(stderr, "\n");
-            TheJIT->addModule(std::move(TheModule));
-            InitializeModuleAndPassManager();
         }
     } else {
         getNextToken();
@@ -885,19 +867,7 @@ static void HandleExtern() {
 
 static void HandleTopLevelExpression() {
     if (auto FnAST = ParseTopLevelExpr()) {
-        if (FnAST->codegen()) {
-            auto H = TheJIT->addModule(std::move(TheModule));
-            InitializeModuleAndPassManager();
-
-            auto ExprSymbol = TheJIT->findSymbol("__anon_expr");
-            assert(ExprSymbol && "Function not found");
-
-            double (*FP)() =
-                (double (*)())(intptr_t)cantFail(ExprSymbol.getAddress());
-            fprintf(stderr, "Evaluated to %f\n", FP());
-
-            TheJIT->removeModule(H);
-        }
+        FnAST->codegen();
     } else {
         getNextToken();
     }
@@ -905,7 +875,6 @@ static void HandleTopLevelExpression() {
 
 static void MainLoop() {
     while (true) {
-        fprintf(stderr, "ready> ");
         switch (CurTok) {
             case tok_eof:
                 return;
@@ -945,11 +914,6 @@ extern "C" DLLEXPORT double printd(double X) {
 //===----------------------------------------------------------------------===//
 
 int main() {
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
-    InitializeNativeTargetAsmParser();
-
-    BinopPrecedence['='] = 2;
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
@@ -958,11 +922,58 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    TheJIT = llvm::make_unique<KaleidoscopeJIT>();
-
     InitializeModuleAndPassManager();
 
     MainLoop();
+
+    InitializeAllTargetInfos();
+    InitializeAllTargets();
+    InitializeAllTargetMCs();
+    InitializeAllAsmParsers();
+    InitializeAllAsmPrinters();
+
+    auto TargetTriple = sys::getDefaultTargetTriple();
+    TheModule->setTargetTriple(TargetTriple);
+
+    std::string Error;
+    auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
+
+    if (!Target) {
+        errs() << Error;
+        return 1;
+    }
+
+    auto CPU = "generic";
+    auto Features = "";
+
+    TargetOptions opt;
+    auto RM = Optional<Reloc::Model>();
+    auto TheTargetMachine =
+        Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
+
+    TheModule->setDataLayout(TheTargetMachine->createDataLayout());
+
+    auto Filename = "output.o";
+    std::error_code EC;
+    raw_fd_ostream dest(Filename, EC, sys::fs::F_None);
+
+    if (EC) {
+        errs() << "Could not open file: " << EC.message();
+        return 1;
+    }
+
+    legacy::PassManager pass;
+    auto FileType = TargetMachine::CGFT_ObjectFile;
+
+    if (TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
+        errs() << "TheTargetMachine can't emit a file of this type";
+        return 1;
+    }
+
+    pass.run(*TheModule);
+    dest.flush();
+
+    outs() << "Wrote " << Filename << "\n";
 
     return 0;
 }
