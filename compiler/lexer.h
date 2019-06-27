@@ -410,7 +410,7 @@ Token* Lexer::tokenize() {
         else
             continue;  //否则一直扫描直到结束
     }
-    //文件结束
+    
     if (token) delete token;
     return token = new Token(END);
 }
