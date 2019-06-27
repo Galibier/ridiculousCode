@@ -181,7 +181,7 @@ enum SemError {
     ARRAY_LEN_INVALID,  //数组长度无效
     VAR_INIT_ERR,       //变量初始化类型错误
     GLB_INIT_ERR,       //全局变量初始化值不是常量
-    VOID_VAR,           // void变量
+    VOID_VAR,           //void变量
     EXPR_NOT_LEFT_VAL,  //无效的左值表达式
     ASSIGN_TYPE_ERR,    //赋值类型不匹配
     EXPR_IS_BASE,       //表达式不能是基本类型

@@ -13,7 +13,7 @@ const char* tokenName[] = {
 
 class Token {
    public:
-    Tag tag;  //内部标签
+    Tag tag;
     Token(Tag t) : tag(t) {}
     virtual string toString() { return tokenName[tag]; }
     virtual ~Token() {}
